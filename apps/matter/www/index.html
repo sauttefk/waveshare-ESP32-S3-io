@@ -330,7 +330,6 @@
 
     function cancelSetup() {
       stopPolling();
-      fetch('/api/auth/token?s=cancel');
       showScreen('auth-no-pw');
       document.getElementById('auth-begin-btn').disabled = false;
     }

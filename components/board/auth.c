@@ -123,6 +123,19 @@ static esp_timer_handle_t  s_timeout_timer = NULL;
 static esp_timer_handle_t  s_blink_timer   = NULL;
 static bool                s_blink_on      = false;
 
+#define AUTH_WAIT_US   (30ULL  * 1000000ULL)   /* time to reach the button */
+#define AUTH_READY_US  (120ULL * 1000000ULL)   /* time to type the password */
+
+static void stop_blink(void)
+{
+    if (s_blink_timer) {
+        esp_timer_stop(s_blink_timer);
+        esp_timer_delete(s_blink_timer);
+        s_blink_timer = NULL;
+    }
+    led_force_set(0, 0, 0);
+}
+
 static void stop_timers(void)
 {
     if (s_timeout_timer) {
@@ -138,11 +151,15 @@ static void stop_timers(void)
     led_force_set(0, 0, 0);
 }
 
+/* Both WAITING and READY expire. A READY token that nobody collects -- the
+   browser was closed after the button press -- used to live until the next
+   power cycle and answered every new setup attempt with "already pending". */
 static void on_timeout(void *arg)
 {
-    if (s_state == AUTH_TOK_WAITING) {
+    if (s_state == AUTH_TOK_WAITING || s_state == AUTH_TOK_READY) {
         s_state = AUTH_TOK_TIMEOUT;
-        ESP_LOGW(TAG, "Token request timed out");
+        memset(s_token, 0, sizeof(s_token));
+        ESP_LOGW(TAG, "Token timed out");
         button_on_short_press(NULL);
     }
     stop_timers();
@@ -170,7 +187,7 @@ esp_err_t auth_token_begin(char session_out[9])
 
     esp_timer_create_args_t ta = { .callback = on_timeout, .name = "auth_to" };
     esp_timer_create(&ta, &s_timeout_timer);
-    esp_timer_start_once(s_timeout_timer, 30ULL * 1000000ULL);
+    esp_timer_start_once(s_timeout_timer, AUTH_WAIT_US);
 
     esp_timer_create_args_t ba = { .callback = on_blink, .name = "auth_blink" };
     esp_timer_create(&ba, &s_blink_timer);
@@ -186,7 +203,11 @@ void auth_on_button_press(void)
     if (s_state == AUTH_TOK_WAITING) {
         s_state = AUTH_TOK_READY;
         ESP_LOGI(TAG, "Button pressed — token ready");
-        stop_timers();
+        stop_blink();
+        if (s_timeout_timer) {
+            esp_timer_stop(s_timeout_timer);
+            esp_timer_start_once(s_timeout_timer, AUTH_READY_US);
+        }
     }
 }
 

@@ -599,7 +599,6 @@ rule('my-rule')
 
     function cancelSetup() {
       stopPolling();
-      fetch('/api/auth/token?s=cancel');  /* let server timeout naturally */
       showScreen('auth-no-pw');
       document.getElementById('auth-begin-btn').disabled = false;
     }
