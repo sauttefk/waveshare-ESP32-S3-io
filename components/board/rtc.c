@@ -4,16 +4,22 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include <string.h>
+#include <stdio.h>
 
 #define TAG             "rtc"
 #define PCF85063_ADDR   0x51
 #define REG_CTRL_1      0x00
 #define REG_SECONDS     0x04   /* sec, min, hour, day, weekday, month, year (7 bytes) */
+#define REG_RAM_BYTE    0x03   /* unused by this firmware */
 #define CTRL_1_CAP_SEL  0x01   /* 12.5 pF crystal load (matches the board) */
 #define CTRL_1_STOP     0x20   /* 1 = clock stopped */
 #define SECONDS_OS      0x80   /* seconds reg bit 7: oscillator stopped → time lost */
 #define I2C_TIMEOUT_MS  50
-#define YEAR_BASE       1970   /* RTC year register 0-99 ↔ 1970-2069 */
+/* The chip adds February 29 to every register year divisible by four, so
+   the register must count from a leap year that keeps the Gregorian cycle:
+   2000 does, 1970 did not -- it gave 2026 a leap day and took 2028's. */
+#define YEAR_BASE       2000   /* RTC year register 0-99 ↔ 2000-2099 */
+#define YEARS_AHEAD_MAX 10     /* how far past the build date a stored time may lie */
 
 static i2c_master_dev_handle_t s_dev = NULL;
 
@@ -62,13 +68,35 @@ esp_err_t rtc_dev_init(void)
     return ESP_OK;
 }
 
+/* Year, month and day of the build, from the compiler's __DATE__ ("Oct  7 2026"). */
+static void build_date(int *year, int *mon, int *mday)
+{
+    static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    char m[4] = "";
+    int d = 1, y = 2000;
+    sscanf(__DATE__, "%3s %d %d", m, &d, &y);
+    const char *p = strstr(months, m);
+    *mon  = p ? (int)((p - months) / 3) : 0;
+    *mday = d;
+    *year = y;
+}
+
+static bool rtc_time_plausible(const struct tm *t)
+{
+    int by, bm, bd;
+    build_date(&by, &bm, &bd);
+    long rtc_day   = ((long)t->tm_year + 1900) * 10000L + (t->tm_mon + 1) * 100L + t->tm_mday;
+    long build_day = (long)by * 10000L + (bm + 1) * 100L + bd;
+    if (rtc_day < build_day) return false;
+    if (t->tm_year + 1900 > by + YEARS_AHEAD_MAX) return false;
+    return true;
+}
+
 esp_err_t rtc_dev_read(struct tm *out, bool *valid)
 {
     if (!s_dev || !out) return ESP_ERR_INVALID_STATE;
     uint8_t b[7];
     ESP_RETURN_ON_ERROR(reg_read(REG_SECONDS, b, sizeof(b)), TAG, "read time");
-
-    if (valid) *valid = !(b[0] & SECONDS_OS);   /* OS flag set → time not trustworthy */
 
     memset(out, 0, sizeof(*out));
     out->tm_sec   = bcd2dec(b[0] & 0x7F);
@@ -79,6 +107,16 @@ esp_err_t rtc_dev_read(struct tm *out, bool *valid)
     out->tm_mon   = bcd2dec(b[5] & 0x1F) - 1;    /* 0-11 */
     out->tm_year  = bcd2dec(b[6]) + YEAR_BASE - 1900;
     out->tm_isdst = 0;
+
+    if (valid) {
+        /* The OS flag says the oscillator stopped and the time is lost. On
+           top of that the time has to be plausible: a firmware cannot have
+           been built after the moment the clock shows, and a clock running
+           more than YEARS_AHEAD_MAX past the build is not keeping time. That
+           also catches a register written by firmware that counted from
+           1970 -- it reads thirty years ahead -- without a migration. */
+        *valid = !(b[0] & SECONDS_OS) && rtc_time_plausible(out);
+    }
     return ESP_OK;
 }
 
