@@ -46,6 +46,17 @@
 #define MB_RS485_TOUT_MIN_MS        50
 #define MB_RS485_TOUT_MAX_MS     10000
 
+#define MB_UID_MIN                   1   /* unit ids the protocol allows a device */
+#define MB_UID_MAX                 247
+
+/* Defaults of a Modbus TCP master entry. A blob stored by firmware that did
+   not know a field reads it as zero; app_config_init() turns every such zero
+   into these, so no reader has to. */
+#define MBM_PORT_DEFAULT           502
+#define MBM_UNIT_ID_DEFAULT          1
+#define MBM_FC_DEFAULT               3
+#define MBM_INTERVAL_DEFAULT_MS   5000
+
 /* Modbus TCP master: registers this board reads from other people's devices.
    Each entry is one value -- a name, where to get it, and how to read it. */
 #define APP_CFG_MBM_COUNT      8

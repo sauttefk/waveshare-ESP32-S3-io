@@ -143,12 +143,7 @@ static void stop_timers(void)
         esp_timer_delete(s_timeout_timer);
         s_timeout_timer = NULL;
     }
-    if (s_blink_timer) {
-        esp_timer_stop(s_blink_timer);
-        esp_timer_delete(s_blink_timer);
-        s_blink_timer = NULL;
-    }
-    led_force_set(0, 0, 0);
+    stop_blink();
 }
 
 /* Both WAITING and READY expire. A READY token that nobody collects -- the

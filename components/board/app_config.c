@@ -58,6 +58,25 @@ static app_config_t s_cfg = {
 #define NVS_GET_STR(h, key, dst) \
     do { size_t _l = sizeof(dst); nvs_get_str((h), (key), (dst), &_l); } while (0)
 
+/* A blob written before a field existed reads it as zero, and a blob written
+   by a hand-edited request can hold a value outside its range. Settled here,
+   once, after loading: every reader then takes the structure as it is. */
+static void modbus_normalize(app_config_t *c)
+{
+    if (c->modbus.tcp_uid < MB_UID_MIN || c->modbus.tcp_uid > MB_UID_MAX)
+        c->modbus.tcp_uid = MB_TCP_UID_DEFAULT;
+    if (c->modbus.rs485_tout_ms < MB_RS485_TOUT_MIN_MS ||
+        c->modbus.rs485_tout_ms > MB_RS485_TOUT_MAX_MS)
+        c->modbus.rs485_tout_ms = MB_RS485_TOUT_DEFAULT_MS;
+    for (int i = 0; i < APP_CFG_MBM_COUNT; i++) {
+        mbm_poll_t *e = &c->mbm[i];
+        if (!e->port)                                      e->port        = MBM_PORT_DEFAULT;
+        if (e->unit_id < MB_UID_MIN || e->unit_id > MB_UID_MAX) e->unit_id = MBM_UNIT_ID_DEFAULT;
+        if (e->fc != 3 && e->fc != 4)                      e->fc          = MBM_FC_DEFAULT;
+        if (!e->interval_ms)                               e->interval_ms = MBM_INTERVAL_DEFAULT_MS;
+    }
+}
+
 esp_err_t app_config_init(void)
 {
     nvs_handle_t h;
@@ -91,6 +110,7 @@ esp_err_t app_config_init(void)
     nvs_get_blob(h, K_MBM_CFG, s_cfg.mbm, &sz);
 
     nvs_close(h);
+    modbus_normalize(&s_cfg);
     return ESP_OK;
 }
 

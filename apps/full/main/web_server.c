@@ -190,19 +190,26 @@ static bool check_auth(httpd_req_t *req)
     return ok;
 }
 
-static esp_err_t send_401(httpd_req_t *req)
+/* One shape for every JSON answer that is not a payload: status line and
+   body, nothing else to get out of step. */
+static esp_err_t send_json(httpd_req_t *req, const char *status, const char *body)
 {
-    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_status(req, status);
     httpd_resp_set_type(req, "application/json");
-    if (!auth_is_password_set()) {
-        /* No WWW-Authenticate here: there is no password a browser dialog
-           could ask for. The body tells a client what to do instead. */
-        httpd_resp_sendstr(req, "{\"error\":\"setup_required\"}");
-        return ESP_OK;
-    }
-    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"Device\"");
-    httpd_resp_sendstr(req, "{\"error\":\"unauthorized\"}");
+    httpd_resp_sendstr(req, body);
     return ESP_OK;
+}
+
+/* A request that may not pass. Without a password the device is not set up,
+   and no credentials would help: that is 403, with a body a client can act
+   on, and no WWW-Authenticate for a browser to open a dialog over. With a
+   password it is the ordinary 401 challenge. */
+static esp_err_t send_denied(httpd_req_t *req)
+{
+    if (!auth_is_password_set())
+        return send_json(req, "403 Forbidden", "{\"error\":\"setup_required\"}");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"Device\"");
+    return send_json(req, "401 Unauthorized", "{\"error\":\"unauthorized\"}");
 }
 
 /* ------------------------------------------------------------------ auth endpoints */
@@ -224,10 +231,7 @@ static esp_err_t api_auth_begin(httpd_req_t *req)
     char session[9];
     esp_err_t r = auth_token_begin(session);
     if (r == ESP_ERR_INVALID_STATE) {
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"already_pending\"}");
-        return ESP_OK;
+        return send_json(req, "409 Conflict", "{\"error\":\"already_pending\"}");
     }
     if (r != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Internal error");
@@ -314,18 +318,12 @@ static esp_err_t api_auth_set_password(httpd_req_t *req)
     }
     if (strlen(pw_j->valuestring) < 8) {
         cJSON_Delete(root);
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"password_too_short\"}");
-        return ESP_OK;
+        return send_json(req, "400 Bad Request", "{\"error\":\"password_too_short\"}");
     }
 
     if (!auth_token_consume(token_j->valuestring)) {
         cJSON_Delete(root);
-        httpd_resp_set_status(req, "403 Forbidden");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"invalid_token\"}");
-        return ESP_OK;
+        return send_json(req, "403 Forbidden", "{\"error\":\"invalid_token\"}");
     }
 
     esp_err_t set_ret = auth_set_password(pw_j->valuestring);
@@ -333,10 +331,7 @@ static esp_err_t api_auth_set_password(httpd_req_t *req)
     if (set_ret != ESP_OK) {
         /* The token is spent either way; say what happened rather than
            reporting a protection the flash does not have. */
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"password could not be stored\"}");
-        return ESP_OK;
+        return send_json(req, "500 Internal Server Error", "{\"error\":\"password could not be stored\"}");
     }
 
     httpd_resp_set_type(req, "application/json");
@@ -375,7 +370,7 @@ static void mbm_type_value(const char *s, uint8_t *out)
 
 static esp_err_t api_config_get(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
     const app_config_t *cfg = app_config_get();
 
     cJSON *root = cJSON_CreateObject();
@@ -401,8 +396,7 @@ static esp_err_t api_config_get(httpd_req_t *req)
     cJSON_AddStringToObject(mb, "rs485_role",
                             cfg->modbus.rs485_role == MB_ROLE_MASTER ? "master" : "slave");
     cJSON_AddBoolToObject  (mb, "tcp_server", cfg->modbus.tcp_server);
-    cJSON_AddNumberToObject(mb, "tcp_uid",
-                            cfg->modbus.tcp_uid ? cfg->modbus.tcp_uid : MB_TCP_UID_DEFAULT);
+    cJSON_AddNumberToObject(mb, "tcp_uid",     cfg->modbus.tcp_uid);
     cJSON *mbm = cJSON_AddArrayToObject(root, "mbm");
     for (int i = 0; i < APP_CFG_MBM_COUNT; i++) {
         const mbm_poll_t *e = &cfg->mbm[i];
@@ -410,8 +404,8 @@ static esp_err_t api_config_get(httpd_req_t *req)
         cJSON_AddBoolToObject  (o, "enable",      e->enable);
         cJSON_AddStringToObject(o, "name",        e->name);
         cJSON_AddStringToObject(o, "host",        e->host);
-        cJSON_AddNumberToObject(o, "port",        e->port ? e->port : 502);
-        cJSON_AddNumberToObject(o, "unit_id",     e->unit_id ? e->unit_id : 1);
+        cJSON_AddNumberToObject(o, "port",        e->port);
+        cJSON_AddNumberToObject(o, "unit_id",     e->unit_id);
         cJSON_AddStringToObject(o, "fc",          e->fc == 4 ? "input" : "holding");
         cJSON_AddNumberToObject(o, "reg",         e->reg);
         cJSON_AddStringToObject(o, "type",        mbm_type_name(e->type));
@@ -420,13 +414,11 @@ static esp_err_t api_config_get(httpd_req_t *req)
            configuration other than the one in effect; 0 is refused on the way
            in instead. */
         cJSON_AddNumberToObject(o, "scale",       e->scale);
-        cJSON_AddNumberToObject(o, "interval_ms", e->interval_ms ? e->interval_ms : 5000);
+        cJSON_AddNumberToObject(o, "interval_ms", e->interval_ms);
         cJSON_AddItemToArray(mbm, o);
     }
 
-    cJSON_AddNumberToObject(mb, "rs485_tout_ms",
-                            cfg->modbus.rs485_tout_ms ? cfg->modbus.rs485_tout_ms
-                                                      : MB_RS485_TOUT_DEFAULT_MS);
+    cJSON_AddNumberToObject(mb, "rs485_tout_ms", cfg->modbus.rs485_tout_ms);
 
     cJSON *sntp = cJSON_AddObjectToObject(root, "sntp");
     cJSON_AddBoolToObject  (sntp, "enable", cfg->sntp.enable);
@@ -475,7 +467,7 @@ static esp_err_t api_config_get(httpd_req_t *req)
 
 static esp_err_t api_config_post(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
     if (req->content_len > BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
         return ESP_OK;
@@ -641,8 +633,8 @@ static esp_err_t api_config_post(httpd_req_t *req)
             mbm_poll_t *e = &cfg.mbm[i];
             cJSON *v;
 
-            e->port = 502; e->unit_id = 1; e->fc = 3;
-            e->scale = 1.0f; e->interval_ms = 5000;
+            e->port = MBM_PORT_DEFAULT; e->unit_id = MBM_UNIT_ID_DEFAULT;
+            e->fc = MBM_FC_DEFAULT; e->scale = 1.0f; e->interval_ms = MBM_INTERVAL_DEFAULT_MS;
 
             /* A script writing "enable": 1 rather than true would otherwise
                store a silently disabled entry and get 200 back. */
@@ -749,10 +741,7 @@ static esp_err_t api_config_post(httpd_req_t *req)
     if (upd != ESP_OK) {
         /* Nothing below is applied: the live configuration is still the old
            one, and that is what the device keeps running. */
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"configuration could not be stored\"}");
-        return ESP_OK;
+        return send_json(req, "500 Internal Server Error", "{\"error\":\"configuration could not be stored\"}");
     }
 
     /* Only when this request actually carried the table. Reloading clears the
@@ -832,7 +821,7 @@ static esp_err_t api_time_get(httpd_req_t *req)
  * mirror it to the RTC. Used to set the time manually from the browser. */
 static esp_err_t api_time_post(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
     if (req->content_len > BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
         return ESP_OK;
@@ -983,13 +972,10 @@ static esp_err_t file_get(httpd_req_t *req)
 #ifdef CONFIG_APP_MATTER_ENABLE
 static esp_err_t api_matter_decommission(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
 
     if (!matter_is_commissioned()) {
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"not_commissioned\"}");
-        return ESP_OK;
+        return send_json(req, "409 Conflict", "{\"error\":\"not_commissioned\"}");
     }
 
     httpd_resp_set_type(req, "application/json");
@@ -1003,7 +989,7 @@ static esp_err_t api_matter_decommission(httpd_req_t *req)
 
 static esp_err_t api_matter_pairing(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
 
     const char *qr  = matter_get_qr_code();
     const char *man = matter_get_manual_code();
@@ -1011,10 +997,7 @@ static esp_err_t api_matter_pairing(httpd_req_t *req)
 
     /* Return 404 only when Matter is truly inactive (no QR code AND not commissioned). */
     if ((!qr || !qr[0]) && !commissioned) {
-        httpd_resp_set_status(req, "404 Not Found");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"matter_not_enabled\"}");
-        return ESP_OK;
+        return send_json(req, "404 Not Found", "{\"error\":\"matter_not_enabled\"}");
     }
 
     cJSON *root = cJSON_CreateObject();
@@ -1037,7 +1020,7 @@ static void do_restart(void *arg);  /* defined below in /api/reboot section */
 
 static esp_err_t api_eth_only(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
     if (req->content_len > 64) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
         return ESP_OK;
@@ -1090,7 +1073,7 @@ static void do_restart(void *arg) { esp_restart(); }
 
 static esp_err_t api_factory_reset(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"resetting\"}");
 
@@ -1108,7 +1091,7 @@ static esp_err_t api_factory_reset(httpd_req_t *req)
 
 static esp_err_t api_reboot(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"rebooting\"}");
@@ -1127,7 +1110,7 @@ static esp_err_t api_reboot(httpd_req_t *req)
 /* GET /api/io/state — current logical state of all DI and DO channels */
 static esp_err_t api_io_state(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
 
     cJSON *root = cJSON_CreateObject();
     cJSON *di   = cJSON_AddArrayToObject(root, "di");
@@ -1149,7 +1132,7 @@ static esp_err_t api_io_state(httpd_req_t *req)
 /* POST /api/io/output — {"channel":0-7,"value":bool} or {"channel":0-7,"toggle":true} */
 static esp_err_t api_io_output(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
     if (req->content_len == 0 || req->content_len > 64) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad body");
         return ESP_OK;
@@ -1200,7 +1183,7 @@ static esp_err_t api_io_output(httpd_req_t *req)
 /* POST /api/io/led — {"r":0-255,"g":0-255,"b":0-255} or {"color":"#RRGGBB"} */
 static esp_err_t api_io_led(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
     if (req->content_len == 0 || req->content_len > 64) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad body");
         return ESP_OK;
@@ -1238,7 +1221,7 @@ static esp_err_t api_io_led(httpd_req_t *req)
 /* POST /api/io/buzzer — {"freq":440,"duration":200} */
 static esp_err_t api_io_buzzer(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
     if (req->content_len == 0 || req->content_len > 64) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad body");
         return ESP_OK;
@@ -1268,7 +1251,7 @@ static esp_err_t api_io_buzzer(httpd_req_t *req)
 /* GET /api/rules — returns {"script":"..."} from NVS, or the demo script if unset */
 static esp_err_t api_rules_get(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
 
     char *buf = malloc(RULES_MAX_LEN + 1);
     if (!buf) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"); return ESP_OK; }
@@ -1297,7 +1280,7 @@ static esp_err_t api_rules_get(httpd_req_t *req)
 /* POST /api/rules — {"script":"..."} saves to NVS and hot-reloads the engine */
 static esp_err_t api_rules_post(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
     if (req->content_len == 0 || req->content_len > RULES_MAX_LEN + 100) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
         return ESP_OK;
@@ -1345,10 +1328,7 @@ static esp_err_t api_rules_post(httpd_req_t *req)
     uint32_t mine = scripting_reload(script[0] ? script : DEMO_SCRIPT);
     if (!mine) {
         cJSON_Delete(root);
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"status\":\"busy\",\"detail\":\"engine queue full, nothing stored\"}");
-        return ESP_OK;
+        return send_json(req, "503 Service Unavailable", "{\"status\":\"busy\",\"detail\":\"engine queue full, nothing stored\"}");
     }
 
     scripting_reload_status_t now = { 0 };
@@ -1363,10 +1343,7 @@ static esp_err_t api_rules_post(httpd_req_t *req)
            way nothing is stored, the flash keeps the script that was last
            known good, and the caller is told the outcome is open. */
         cJSON_Delete(root);
-        httpd_resp_set_status(req, "202 Accepted");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"status\":\"accepted\",\"detail\":\"not stored until accepted\"}");
-        return ESP_OK;
+        return send_json(req, "202 Accepted", "{\"status\":\"accepted\",\"detail\":\"not stored until accepted\"}");
     }
 
     if (!now.ok) {
@@ -1402,11 +1379,7 @@ static esp_err_t api_rules_post(httpd_req_t *req)
     cJSON_Delete(root);
     if (nvs_ret != ESP_OK) {
         ESP_LOGE(TAG, "storing rules failed: %s", esp_err_to_name(nvs_ret));
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"status\":\"error\",\"error\":\"rules running but not stored\","
-                                "\"detail\":\"the previous script returns at the next reboot\"}");
-        return ESP_OK;
+        return send_json(req, "500 Internal Server Error", "{\"status\":\"error\",\"error\":\"rules running but not stored\"," "\"detail\":\"the previous script returns at the next reboot\"}");
     }
 
     httpd_resp_set_type(req, "application/json");
@@ -1435,7 +1408,7 @@ static esp_err_t api_version(httpd_req_t *req)
    wrong. */
 static esp_err_t api_modbus_status(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
 
     cJSON *root = cJSON_CreateObject();
     if (!root) {

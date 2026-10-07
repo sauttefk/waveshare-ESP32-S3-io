@@ -145,19 +145,26 @@ static bool check_auth(httpd_req_t *req)
     return ok;
 }
 
-static esp_err_t send_401(httpd_req_t *req)
+/* One shape for every JSON answer that is not a payload: status line and
+   body, nothing else to get out of step. */
+static esp_err_t send_json(httpd_req_t *req, const char *status, const char *body)
 {
-    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_status(req, status);
     httpd_resp_set_type(req, "application/json");
-    if (!auth_is_password_set()) {
-        /* No WWW-Authenticate here: there is no password a browser dialog
-           could ask for. The body tells a client what to do instead. */
-        httpd_resp_sendstr(req, "{\"error\":\"setup_required\"}");
-        return ESP_OK;
-    }
-    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"Device\"");
-    httpd_resp_sendstr(req, "{\"error\":\"unauthorized\"}");
+    httpd_resp_sendstr(req, body);
     return ESP_OK;
+}
+
+/* A request that may not pass. Without a password the device is not set up,
+   and no credentials would help: that is 403, with a body a client can act
+   on, and no WWW-Authenticate for a browser to open a dialog over. With a
+   password it is the ordinary 401 challenge. */
+static esp_err_t send_denied(httpd_req_t *req)
+{
+    if (!auth_is_password_set())
+        return send_json(req, "403 Forbidden", "{\"error\":\"setup_required\"}");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"Device\"");
+    return send_json(req, "401 Unauthorized", "{\"error\":\"unauthorized\"}");
 }
 
 /* ------------------------------------------------------------------ auth endpoints */
@@ -177,10 +184,7 @@ static esp_err_t api_auth_begin(httpd_req_t *req)
     char session[9];
     esp_err_t r = auth_token_begin(session);
     if (r == ESP_ERR_INVALID_STATE) {
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"already_pending\"}");
-        return ESP_OK;
+        return send_json(req, "409 Conflict", "{\"error\":\"already_pending\"}");
     }
     if (r != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Internal error");
@@ -264,18 +268,12 @@ static esp_err_t api_auth_set_password(httpd_req_t *req)
     }
     if (strlen(pw_j->valuestring) < 8) {
         cJSON_Delete(root);
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"password_too_short\"}");
-        return ESP_OK;
+        return send_json(req, "400 Bad Request", "{\"error\":\"password_too_short\"}");
     }
 
     if (!auth_token_consume(token_j->valuestring)) {
         cJSON_Delete(root);
-        httpd_resp_set_status(req, "403 Forbidden");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"invalid_token\"}");
-        return ESP_OK;
+        return send_json(req, "403 Forbidden", "{\"error\":\"invalid_token\"}");
     }
 
     esp_err_t set_ret = auth_set_password(pw_j->valuestring);
@@ -283,10 +281,7 @@ static esp_err_t api_auth_set_password(httpd_req_t *req)
     if (set_ret != ESP_OK) {
         /* The token is spent either way; say what happened rather than
            reporting a protection the flash does not have. */
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"password could not be stored\"}");
-        return ESP_OK;
+        return send_json(req, "500 Internal Server Error", "{\"error\":\"password could not be stored\"}");
     }
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
@@ -297,7 +292,7 @@ static esp_err_t api_auth_set_password(httpd_req_t *req)
 
 static esp_err_t api_config_get(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
     const app_config_t *cfg = app_config_get();
 
     cJSON *root = cJSON_CreateObject();
@@ -330,7 +325,7 @@ static esp_err_t api_config_get(httpd_req_t *req)
 
 static esp_err_t api_config_post(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
     if (req->content_len > BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
         return ESP_OK;
@@ -375,10 +370,7 @@ static esp_err_t api_config_post(httpd_req_t *req)
     }
 
     if (app_config_update(&cfg) != ESP_OK) {
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"configuration could not be stored\"}");
-        return ESP_OK;
+        return send_json(req, "500 Internal Server Error", "{\"error\":\"configuration could not be stored\"}");
     }
     matter_set_node_label(cfg.device_name);
 
@@ -468,17 +460,14 @@ static esp_err_t file_get(httpd_req_t *req)
 
 static esp_err_t api_matter_pairing(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
 
     const char *qr  = matter_get_qr_code();
     const char *man = matter_get_manual_code();
     bool commissioned = matter_is_commissioned();
 
     if ((!qr || !qr[0]) && !commissioned) {
-        httpd_resp_set_status(req, "404 Not Found");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"matter_not_active\"}");
-        return ESP_OK;
+        return send_json(req, "404 Not Found", "{\"error\":\"matter_not_active\"}");
     }
 
     cJSON *root = cJSON_CreateObject();
@@ -498,13 +487,10 @@ static esp_err_t api_matter_pairing(httpd_req_t *req)
 
 static esp_err_t api_matter_decommission(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
 
     if (!matter_is_commissioned()) {
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"not_commissioned\"}");
-        return ESP_OK;
+        return send_json(req, "409 Conflict", "{\"error\":\"not_commissioned\"}");
     }
 
     httpd_resp_set_type(req, "application/json");
@@ -518,7 +504,7 @@ static esp_err_t api_matter_decommission(httpd_req_t *req)
 
 static esp_err_t api_io_state(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
 
     cJSON *root = cJSON_CreateObject();
     cJSON *di   = cJSON_AddArrayToObject(root, "di");
@@ -537,7 +523,7 @@ static esp_err_t api_io_state(httpd_req_t *req)
 
 static esp_err_t api_io_output(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
     if (req->content_len == 0 || req->content_len > 64) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad body");
         return ESP_OK;
@@ -588,7 +574,7 @@ static esp_err_t api_io_output(httpd_req_t *req)
 
 static esp_err_t api_io_led(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
     if (req->content_len == 0 || req->content_len > 64) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad body");
         return ESP_OK;
@@ -643,7 +629,7 @@ static void do_restart(void *arg) { esp_restart(); }
 
 static esp_err_t api_factory_reset(httpd_req_t *req)
 {
-    if (!check_auth(req)) return send_401(req);
+    if (!check_auth(req)) return send_denied(req);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"resetting\"}");
 
