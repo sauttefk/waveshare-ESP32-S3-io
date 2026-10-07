@@ -12,8 +12,17 @@
 
 #define TAG    "auth"
 #define NVS_NS "auth"
-#define K_SALT "salt"
-#define K_HASH "hash"
+#define K_CRED "cred"    /* salt and hash together, one blob, one write */
+
+/* Salt and hash are stored as ONE blob. NVS writes every nvs_set_*() to
+   flash at once and nvs_commit() is a no-op, so two separate writes could
+   be torn by a failure or a power cut in between -- and a new salt beside
+   an old hash matches no password at all, which locks the device for good
+   because the factory reset sits behind the login. One blob is one write. */
+typedef struct {
+    uint8_t salt[16];
+    uint8_t hash[32];
+} auth_cred_t;
 
 /* ---------------------------------------------------------------- password */
 
@@ -53,10 +62,15 @@ esp_err_t auth_init(void)
     if (r == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
     if (r != ESP_OK) return r;
 
-    size_t sz = sizeof(s_pw_salt);
-    if (nvs_get_blob(h, K_SALT, s_pw_salt, &sz) == ESP_OK) {
-        sz = sizeof(s_pw_hash);
-        if (nvs_get_blob(h, K_HASH, s_pw_hash, &sz) == ESP_OK) s_pw_set = true;
+    /* Only the blob is read. A device written by firmware that stored the
+       pair as two keys comes up without a password and is set up again;
+       there is no migration, by decision. */
+    auth_cred_t c;
+    size_t sz = sizeof(c);
+    if (nvs_get_blob(h, K_CRED, &c, &sz) == ESP_OK && sz == sizeof(c)) {
+        memcpy(s_pw_salt, c.salt, sizeof(s_pw_salt));
+        memcpy(s_pw_hash, c.hash, sizeof(s_pw_hash));
+        s_pw_set = true;
     }
     nvs_close(h);
     ESP_LOGI(TAG, "Password %s", s_pw_set ? "loaded" : "not set");
@@ -79,23 +93,22 @@ esp_err_t auth_set_password(const char *pw)
        taken it: a write that fails must leave memory and flash agreeing on
        the old password, or the device answers to one password until the
        next reboot and to another after it, while the caller was told ok. */
-    uint8_t salt[sizeof(s_pw_salt)], hash[sizeof(s_pw_hash)];
-    esp_fill_random(salt, sizeof(salt));
-    compute_hash(salt, pw, hash);
+    auth_cred_t c;
+    esp_fill_random(c.salt, sizeof(c.salt));
+    compute_hash(c.salt, pw, c.hash);
 
     nvs_handle_t h;
     esp_err_t r = nvs_open(NVS_NS, NVS_READWRITE, &h);
     if (r != ESP_OK) return r;
-    r = nvs_set_blob(h, K_SALT, salt, sizeof(salt));
-    if (r == ESP_OK) r = nvs_set_blob(h, K_HASH, hash, sizeof(hash));
+    r = nvs_set_blob(h, K_CRED, &c, sizeof(c));     /* the one write that counts */
     if (r == ESP_OK) r = nvs_commit(h);
     nvs_close(h);
     if (r != ESP_OK) {
         ESP_LOGE(TAG, "storing the password failed: %s", esp_err_to_name(r));
         return r;
     }
-    memcpy(s_pw_salt, salt, sizeof(s_pw_salt));
-    memcpy(s_pw_hash, hash, sizeof(s_pw_hash));
+    memcpy(s_pw_salt, c.salt, sizeof(s_pw_salt));
+    memcpy(s_pw_hash, c.hash, sizeof(s_pw_hash));
     s_pw_set = true;
     ESP_LOGI(TAG, "Password updated");
     return ESP_OK;

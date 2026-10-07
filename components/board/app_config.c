@@ -105,7 +105,17 @@ esp_err_t app_config_update(const app_config_t *cfg)
        running the configuration it still has in flash, and the caller is
        told so, instead of running the new one until the next reboot while
        having answered ok. Every step is chained, because a single
-       nvs_set_*() that fails -- a full partition, say -- was swallowed. */
+       nvs_set_*() that fails -- a full partition, say -- was swallowed.
+
+       Known limit: the keys below are written one after another and NVS
+       has no transaction (nvs_commit() is a no-op), so a failure or a
+       power cut part-way leaves the flash with some new and some old
+       values for the next boot. Nothing locks the device that way -- the
+       network settings and the web UI stay reachable, and the next save
+       writes everything again -- which is why the per-key layout, and
+       with it the graceful growth of each struct, is kept. The one store
+       where a torn write would lock the user out, the password, is a
+       single blob for that reason (auth.c). */
     nvs_handle_t h;
     esp_err_t ret = nvs_open(NVS_NS, NVS_READWRITE, &h);
     if (ret != ESP_OK) return ret;
