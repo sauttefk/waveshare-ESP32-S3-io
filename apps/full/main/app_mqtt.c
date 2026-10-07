@@ -6,6 +6,8 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "mqtt_client.h"
 
 #define TAG                  "app_mqtt"
@@ -52,7 +54,24 @@ static void publish_health(void)
                             payload, 0, /*qos*/1, /*retain*/1);
 }
 
-static void health_timer_cb(void *arg) { publish_health(); }
+/* The timer only rings; the publish runs on a task of its own. Publishing
+   takes the client's API lock and may wait on the network, and esp_timer
+   runs every callback in the system on one task in turn: a stalled publish
+   held up rule timers, the auth timeout and every other timer with it. */
+static TaskHandle_t s_health_task;
+
+static void health_task(void *arg)
+{
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        publish_health();
+    }
+}
+
+static void health_timer_cb(void *arg)
+{
+    if (s_health_task) xTaskNotifyGive(s_health_task);
+}
 
 /* ------------------------------------------------------------------ events */
 
@@ -189,6 +208,8 @@ esp_err_t app_mqtt_start(void)
         .name     = "mqtt_health",
     };
     esp_timer_create(&timer_args, &s_health_timer);
+    if (!s_health_task)
+        xTaskCreate(health_task, "mqtt_health", 3072, NULL, 3, &s_health_task);
 
     esp_mqtt_client_register_event(s_client, ESP_EVENT_ANY_ID,
                                    mqtt_event_handler, NULL);
