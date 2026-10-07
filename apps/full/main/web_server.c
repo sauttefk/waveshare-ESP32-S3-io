@@ -1338,21 +1338,30 @@ static esp_err_t api_rules_post(httpd_req_t *req)
        wait here would hold up every other request. A reload normally finishes
        in milliseconds; if it has not after RULES_APPLY_TIMEOUT_MS the request
        is answered with 202 and the outcome is left to the log. */
-    scripting_reload_status_t before;
-    scripting_reload_status(&before);
+    /* The verdict is matched to this request by ticket. Waiting for "any
+       change" let a request that had timed out hand its verdict to the next
+       one: that one then stored its own script on the strength of a success
+       that was not its own. */
+    uint32_t mine = scripting_reload(script[0] ? script : DEMO_SCRIPT);
+    if (!mine) {
+        cJSON_Delete(root);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"busy\",\"detail\":\"engine queue full, nothing stored\"}");
+        return ESP_OK;
+    }
 
-    scripting_reload(script[0] ? script : DEMO_SCRIPT);
-
-    scripting_reload_status_t now = before;
+    scripting_reload_status_t now = { 0 };
     for (int waited = 0; waited < RULES_APPLY_TIMEOUT_MS; waited += 10) {
         scripting_reload_status(&now);
-        if (now.generation != before.generation) break;
+        if (now.ticket >= mine) break;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    if (now.generation == before.generation) {
-        /* No verdict yet, so nothing is stored: the flash keeps the script
-           that was last known good. The caller is told the outcome is open. */
+    if (now.ticket != mine) {
+        /* No verdict for this request yet, or already a later one's: either
+           way nothing is stored, the flash keeps the script that was last
+           known good, and the caller is told the outcome is open. */
         cJSON_Delete(root);
         httpd_resp_set_status(req, "202 Accepted");
         httpd_resp_set_type(req, "application/json");

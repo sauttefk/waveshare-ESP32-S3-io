@@ -54,7 +54,7 @@ typedef struct {
     union {
         struct { char topic[MAX_TOPIC_LEN]; char payload[MAX_PAYLOAD_LEN]; } mqtt;
         struct { uint8_t channel; bool state; } input;
-        struct { char *script; } reload;  // heap-allocated; task frees after eval
+        struct { char *script; uint32_t ticket; } reload;  // script heap-allocated; task frees after eval
         struct { uint32_t id; } timer;     // a rule timer fired (see _set_timer)
         struct { uint8_t source; } activity;  // ACT_MODBUS / ACT_CAN
     };
@@ -101,12 +101,14 @@ static uint32_t     s_timer_full_count;
 static scripting_reload_status_t s_reload_status;
 static SemaphoreHandle_t         s_reload_lock;
 
-static void publish_reload_result(bool ok, const char *message)
+static uint32_t s_reload_seq;           /* last ticket handed out, under s_reload_lock */
+
+static void publish_reload_result(uint32_t ticket, bool ok, const char *message)
 {
     if (s_reload_lock) xSemaphoreTake(s_reload_lock, portMAX_DELAY);
     s_reload_status.ok = ok;
     strlcpy(s_reload_status.message, message ? message : "", sizeof(s_reload_status.message));
-    s_reload_status.generation++;
+    s_reload_status.ticket = ticket;
     if (s_reload_lock) xSemaphoreGive(s_reload_lock);
 }
 
@@ -503,7 +505,7 @@ static void scripting_task(void *arg)
                     JS_SetMemoryLimit(rt, JS_HEAP_LIMIT);
                     ESP_LOGE(TAG, "reload: out of memory, rules unchanged");
                     free(ev.reload.script);
-                    publish_reload_result(false, "out of memory");
+                    publish_reload_result(ev.reload.ticket, false, "out of memory");
                     break;
                 }
 
@@ -548,7 +550,7 @@ static void scripting_task(void *arg)
                     JS_FreeContext(nctx);
                     JS_SetMemoryLimit(rt, JS_HEAP_LIMIT);   /* new one is gone again */
                     ESP_LOGE(TAG, "rules not applied, previous rules still running");
-                    publish_reload_result(false, err);
+                    publish_reload_result(ev.reload.ticket, false, err);
                     break;
                 }
 
@@ -564,7 +566,7 @@ static void scripting_task(void *arg)
                 ctx = nctx;
                 bind_handlers(ctx, &on_mqtt, &on_input, &on_time_sync, &on_activity);
                 ESP_LOGI(TAG, "Rules reloaded");
-                publish_reload_result(true, "");
+                publish_reload_result(ev.reload.ticket, true, "");
                 break;
             }
             case EVT_TIMER:
@@ -653,17 +655,23 @@ void scripting_on_mqtt_message(const char *topic, size_t tlen,
         ESP_LOGW(TAG, "Event queue full — MQTT message dropped");
 }
 
-void scripting_reload(const char *new_script)
+uint32_t scripting_reload(const char *new_script)
 {
-    if (!s_queue || !new_script) return;
+    if (!s_queue || !new_script) return 0;
     char *copy = strdup(new_script);
-    if (!copy) { ESP_LOGE(TAG, "scripting_reload: out of memory"); return; }
+    if (!copy) { ESP_LOGE(TAG, "scripting_reload: out of memory"); return 0; }
     scripting_evt_t ev = { .type = EVT_RELOAD };
     ev.reload.script = copy;
+    if (s_reload_lock) xSemaphoreTake(s_reload_lock, portMAX_DELAY);
+    ev.reload.ticket = ++s_reload_seq;
+    if (ev.reload.ticket == 0) ev.reload.ticket = ++s_reload_seq;   /* 0 means "not queued" */
+    if (s_reload_lock) xSemaphoreGive(s_reload_lock);
     if (xQueueSend(s_queue, &ev, 0) != pdTRUE) {
         ESP_LOGW(TAG, "scripting_reload: queue full");
         free(copy);
+        return 0;
     }
+    return ev.reload.ticket;
 }
 
 void scripting_set_time_valid(void)

@@ -45,13 +45,17 @@ void scripting_on_input_change(uint8_t channel, bool state);
 // The script is evaluated into a fresh context and only takes over if that
 // works; otherwise the rules already running carry on.
 // Safe to call from any task. new_script is copied internally.
-void scripting_reload(const char *new_script);
+// Returns the ticket of the queued reload, or 0 if it could not be queued.
+uint32_t scripting_reload(const char *new_script);
 
-// Outcome of the most recent reload the engine has finished acting on.
-// `generation` goes up by one each time, so a caller can note it before
-// scripting_reload() and wait for it to change rather than guessing.
+// Outcome of the most recent reload the engine has finished acting on,
+// stamped with the ticket scripting_reload() handed out for it. A caller
+// waits until `ticket` reaches its own; verdicts come in ticket order, so a
+// higher one means its own verdict has already been overwritten by a later
+// reload's and must not be taken for it. Waiting for "any change" instead
+// let one request take another's verdict -- and store a refused script.
 typedef struct {
-    uint32_t generation;
+    uint32_t ticket;
     bool     ok;
     char     message[96];      // empty when ok
 } scripting_reload_status_t;
