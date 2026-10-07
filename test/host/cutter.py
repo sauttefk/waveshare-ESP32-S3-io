@@ -63,12 +63,6 @@ class Source:
         a = self.text.rindex("\n", 0, j) + 1
         return self.text[a:b] + "\n"
 
-    def typedef_enum(self, name):
-        m = re.search(r"^typedef enum \{[^}]*\} %s;$" % re.escape(name), self.text, re.M)
-        if not m:
-            self._fail("typedef enum %s" % name)
-        return m.group(0) + "\n"
-
     def span(self, first, last):
         """From the start of first to the end of last -- for declarations that
         only make sense together with the comment that explains them."""

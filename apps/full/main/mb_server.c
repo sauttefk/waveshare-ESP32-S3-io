@@ -177,11 +177,8 @@ static uint8_t local_read_holding(uint16_t addr, uint16_t count, uint8_t *out)
     if ((uint32_t)addr + count > MB_NUM_HOLDING) return MB_EXC_ILLEGAL_ADDR;
 
     CMD_LOCK();
-    for (uint16_t i = 0; i < count; i++) {           /* big endian on the wire */
-        uint16_t v = s_hr_shadow[addr + i];
-        out[i * 2]     = (uint8_t)(v >> 8);
-        out[i * 2 + 1] = (uint8_t)(v & 0xFF);
-    }
+    for (uint16_t i = 0; i < count; i++)             /* big endian on the wire */
+        mb_put16(&out[i * 2], s_hr_shadow[addr + i]);
     CMD_UNLOCK();
     return MB_EXC_NONE;
 }
@@ -368,9 +365,10 @@ static mb_exception_t rtu_device_id_handler(void *inst, uint8_t *frame, uint16_t
     if (!exc) exc = mb_ident_device_id(&req, data, &dlen);
     if (exc) return (mb_exception_t)exc;        /* same numbering on both sides */
 
-    uint8_t out[2 + MB_DATA_MAX];
-    *len = mb_build_response(&req, frame, data, dlen, MB_EXC_NONE, out);
-    memcpy(frame, out, *len);
+    /* Built straight into the stack's frame buffer: for FC 43 the response
+       builder reads only the function code of the request, which it has
+       already taken from the frame. */
+    *len = mb_build_response(&req, frame, data, dlen, MB_EXC_NONE, frame);
     return MB_EX_NONE;
 }
 
@@ -551,12 +549,9 @@ esp_err_t mb_server_init(void)
 
         /* The TCP server that feeds it needs a working IP stack, which
            app_main() does not have yet; mb_server_net_start() finishes up. */
-        uint16_t tout = cfg->modbus.rs485_tout_ms;
-        if (tout < MB_RS485_TOUT_MIN_MS || tout > MB_RS485_TOUT_MAX_MS)
-            tout = MB_RS485_TOUT_DEFAULT_MS;   /* stored before the field existed */
-
         return mb_gateway_start(MB_UART, cfg->modbus.baudrate,
-                                MB_TX_GPIO, MB_RX_GPIO, MB_RTS_GPIO, tout);
+                                MB_TX_GPIO, MB_RX_GPIO, MB_RTS_GPIO,
+                                cfg->modbus.rs485_tout_ms);
     }
 
     return start_rtu_slave(cfg);
@@ -576,18 +571,15 @@ esp_err_t mb_server_net_start(void)
         return ESP_OK;
     }
 
-    uint8_t uid = cfg->modbus.tcp_uid;
-    if (uid < 1 || uid > 247) uid = MB_TCP_UID_DEFAULT;   /* stored before the field existed */
-
-    esp_err_t ret = mb_tcp_server_start(MB_TCP_PORT, uid);
+    esp_err_t ret = mb_tcp_server_start(MB_TCP_PORT, cfg->modbus.tcp_uid);
     if (ret != ESP_OK) return ret;
 
     if (cfg->modbus.rs485_role == MB_ROLE_MASTER)
         ESP_LOGI(TAG, "Modbus TCP: own I/Os at unit ID %u, every other unit ID "
                       "forwarded to RS-485 at %"PRIu32" baud",
-                 uid, cfg->modbus.baudrate);
+                 cfg->modbus.tcp_uid, cfg->modbus.baudrate);
     else
         ESP_LOGI(TAG, "Modbus TCP: own I/Os at unit ID %u; no gateway, the "
-                      "RS-485 side is a slave", uid);
+                      "RS-485 side is a slave", cfg->modbus.tcp_uid);
     return ESP_OK;
 }

@@ -12,16 +12,6 @@
 
 #define TAG "mb_gw"
 
-/* A read can ask for 2000 coils (250 bytes) or 125 registers (250 bytes), a
-   write for 1968 coils or 123 registers. One size covers all four. */
-/* Large enough for every request the protocol allows: 2000 coils or 125
-   registers read, 1968 coils or 123 registers written -- 250 bytes at most.
-   The guards below are written against MB_DATA_MAX rather than this, because
-   that is the size of the caller's response buffer and the smaller of the
-   two; checking against the local one would let a 128-register read write six
-   bytes past the end of it. */
-#define GW_BUF_BYTES 256
-
 /* How long a request waits for its turn on the segment before being turned
    away, derived from the timeout actually configured rather than from the
    ceiling the configuration allows. It has to clear the worst case of every
@@ -186,10 +176,7 @@ static uint8_t transact(uint8_t uid, uint8_t fc, uint16_t addr,
    big endian, so neither direction is a memcpy. */
 static void regs_to_wire(uint8_t *wire, const uint16_t *regs, uint16_t count)
 {
-    for (uint16_t i = 0; i < count; i++) {
-        wire[i * 2]     = (uint8_t)(regs[i] >> 8);
-        wire[i * 2 + 1] = (uint8_t)(regs[i] & 0xFF);
-    }
+    for (uint16_t i = 0; i < count; i++) mb_put16(&wire[i * 2], regs[i]);
 }
 
 static void wire_to_regs(uint16_t *regs, const uint8_t *wire, uint16_t count)
@@ -213,7 +200,7 @@ uint8_t mb_gateway_handle(uint8_t uid, const mb_request_t *req,
            cannot be handed to it directly. Both sides use the same packed
            layout though -- bit 0 is the first coil of the request -- so the
            copy back is a straight memcpy. */
-        uint8_t tmp[GW_BUF_BYTES];
+        uint8_t tmp[MB_DATA_MAX];       /* the largest data part a PDU can carry */
         uint8_t exc = transact(uid, req->fc, req->addr, req->count, tmp);
         if (exc == MB_EXC_NONE) { memcpy(resp, tmp, bytes); *resp_len = bytes; }
         return exc;
@@ -222,7 +209,7 @@ uint8_t mb_gateway_handle(uint8_t uid, const mb_request_t *req,
     case MB_FC_READ_HOLDING:
     case MB_FC_READ_INPUT: {
         if ((size_t)req->count * 2u > MB_DATA_MAX) return MB_EXC_ILLEGAL_VALUE;
-        uint16_t tmp[GW_BUF_BYTES / 2];
+        uint16_t tmp[MB_DATA_MAX / 2];
         uint8_t exc = transact(uid, req->fc, req->addr, req->count, tmp);
         if (exc == MB_EXC_NONE) {
             regs_to_wire(resp, tmp, req->count);
@@ -246,14 +233,14 @@ uint8_t mb_gateway_handle(uint8_t uid, const mb_request_t *req,
     case MB_FC_WRITE_COILS: {
         size_t bytes = (size_t)MB_BIT_BYTES(req->count);
         if (bytes > MB_DATA_MAX) return MB_EXC_ILLEGAL_VALUE;
-        uint8_t tmp[GW_BUF_BYTES];
+        uint8_t tmp[MB_DATA_MAX];       /* the largest data part a PDU can carry */
         memcpy(tmp, req->data, bytes);
         return transact(uid, req->fc, req->addr, req->count, tmp);
     }
 
     case MB_FC_WRITE_REGISTERS: {
         if ((size_t)req->count * 2u > MB_DATA_MAX) return MB_EXC_ILLEGAL_VALUE;
-        uint16_t tmp[GW_BUF_BYTES / 2];
+        uint16_t tmp[MB_DATA_MAX / 2];
         wire_to_regs(tmp, req->data, req->count);
         return transact(uid, req->fc, req->addr, req->count, tmp);
     }

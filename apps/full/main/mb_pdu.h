@@ -9,6 +9,17 @@
 
 uint16_t mb_be16(const uint8_t *p);
 
+/* The writing direction of the same thing, for every place that puts a
+   register on the wire. */
+static inline void mb_put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
+static inline void mb_put32(uint8_t *p, uint32_t v) { mb_put16(p, (uint16_t)(v >> 16)); mb_put16(p + 2, (uint16_t)v); }
+
+/* Writes the MBAP header of a response in front of a PDU of pdu_len bytes
+   already placed at out + MB_MBAP_LEN: transaction and protocol id copied
+   from the request header, length counting the unit id, then the unit id.
+   Returns the length of the whole frame. */
+uint16_t mb_mbap_write(uint8_t *out, const uint8_t *req_hdr, uint8_t uid, uint16_t pdu_len);
+
 /* Takes a request PDU apart. Returns 0 and fills req, or the exception code
    to answer with. Every length is checked against the function code, so a
    handler never sees a count that does not match the bytes behind it.

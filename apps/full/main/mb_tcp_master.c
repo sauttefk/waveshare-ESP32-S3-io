@@ -295,13 +295,17 @@ static rd_result_t read_once(const mbm_poll_t *e, uint16_t regs, double *value,
     uint8_t  req[MB_MBAP_LEN + 5];
     uint16_t tid = ++s_tid;
     uint16_t n = mb_build_read_request(req, tid, e->unit_id, e->fc, e->reg, regs);
+    /* An I/O failure on a connection kept from an earlier poll may be the
+       connection's fault, and is worth one retry on a fresh one; on a fresh
+       connection it is the device's. Decided once, used at every exit. */
+    const rd_result_t on_io_fail = fresh ? RD_FAILED : RD_STALE_CONN;
 
     bool closed = false;
     if (!io_all(c->fd, req, n, true, &closed)) {
         snprintf(err, err_len, closed ? "connection lost while sending"
                                       : "could not send in %d ms", RESPONSE_MS);
         conn_close(c);
-        return fresh ? RD_FAILED : RD_STALE_CONN;
+        return on_io_fail;
     }
 
     /* The header says how long the rest is, so it is read in two goes rather
@@ -311,7 +315,7 @@ static rd_result_t read_once(const mbm_poll_t *e, uint16_t regs, double *value,
         snprintf(err, err_len, closed ? "connection closed by the device"
                                       : "no answer in %d ms", RESPONSE_MS);
         conn_close(c);
-        return fresh ? RD_FAILED : RD_STALE_CONN;
+        return on_io_fail;
     }
     uint16_t rest = mb_be16(&rsp[4]);
     if (rest < 2 || rest > sizeof(rsp) - 6) {
@@ -322,7 +326,7 @@ static rd_result_t read_once(const mbm_poll_t *e, uint16_t regs, double *value,
     if (!io_all(c->fd, &rsp[6], rest, false, &closed)) {
         snprintf(err, err_len, "answer cut short");
         conn_close(c);
-        return fresh ? RD_FAILED : RD_STALE_CONN;
+        return on_io_fail;
     }
 
     const uint8_t *data = NULL;
@@ -531,11 +535,11 @@ static void stage_config(void)
 
 esp_err_t mb_tcp_master_reload(void)
 {
+    /* With no task yet -- the first entry anyone has enabled -- starting is
+       the reload: start() stages the table itself. */
+    if (!s_running) return mb_tcp_master_start();
     stage_config();
-    /* And if this is the first entry anyone has enabled, there is no task
-       yet. Without this the entry would sit there, reported as enabled,
-       until the next reboot. */
-    return mb_tcp_master_start();
+    return ESP_OK;
 }
 
 esp_err_t mb_tcp_master_start(void)

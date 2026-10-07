@@ -249,7 +249,7 @@ out = pathlib.Path(__file__).with_name("test_mb_master.c")
 defines = (budget.defines("NET_SOCK_MB_MASTER") +
            src.defines("CONN_CACHE", "BACKOFF_FIRST_MS", "BACKOFF_MAX_MS"))
 out.write_text(HARNESS.replace("__DEFINES__", defines)
-                      .replace("__TYPES__", src.typedef_enum("rd_result_t") +
+                      .replace("__TYPES__", src.type("} rd_result_t;") +
                                        src.type("} entry_state_t;"))
                       .replace("__CUT__", decl + "\n\n" + cuts))
 print("erzeugt:", out.name)

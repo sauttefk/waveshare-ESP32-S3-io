@@ -55,7 +55,6 @@
    which it sees as a reset: the only honest answer, since there is no request
    yet to reply to. */
 #define MB_TCP_MAX_CONN       NET_SOCK_MB_CONN
-#define MB_TCP_JOB_DEPTH      MB_TCP_WORKERS
 
 /* Room for a burst of connections to wait while the poller is busy elsewhere;
    they cost a PCB each, not a slot. */
@@ -103,7 +102,7 @@
 #define SEND_WAIT_MS         500
 
 
-enum { SLOT_FREE = 0, SLOT_IDLE, SLOT_BUSY, SLOT_DEAD };
+enum { SLOT_FREE = 0, SLOT_IDLE, SLOT_BUSY };
 
 typedef struct {
     int              fd;
@@ -123,7 +122,7 @@ typedef struct {
        left of a response sits here and goes out when the socket says it can
        take it. A worker does not use this -- it has a task of its own and
        may block on its own connection. */
-    uint8_t          out[MB_MBAP_LEN + MB_PDU_MAX];
+    uint8_t          out[FRAME_MAX];
     uint16_t         out_len;      /* 0 = nothing pending                 */
     uint16_t         out_sent;
     int64_t          out_deadline_us;
@@ -212,15 +211,9 @@ static uint16_t process(const uint8_t *frame, uint16_t len, uint8_t *out)
     }
 
     uint16_t out_pdu = mb_build_response(&req, pdu, data, data_len, exc, &out[MB_MBAP_LEN]);
-
-    memcpy(out, frame, 4);                      /* transaction and protocol id */
-    out[4] = (uint8_t)((out_pdu + 1) >> 8);     /* length counts the unit id   */
-    out[5] = (uint8_t)((out_pdu + 1) & 0xFF);
-    out[6] = uid;
-
     s_stats.requests++;
     if (exc != MB_EXC_NONE) s_stats.exceptions++;
-    return (uint16_t)(MB_MBAP_LEN + out_pdu);
+    return mb_mbap_write(out, frame, uid, out_pdu);
 }
 
 /* The deepest call here is a forwarded request: the esp-modbus request chain
@@ -303,6 +296,14 @@ static void close_slot(int i)
     s_conn[i].out_len = 0;
 }
 
+/* Hands a response to the socket at once and drops the connection if it
+   cannot take it; the one way every immediate answer leaves the poller. */
+static void send_now(int i, uint16_t len)
+{
+    arm_out(i, len);
+    if (!flush_out(i)) close_slot(i);
+}
+
 /* True if the connection held a frame it did not finish in time, in which
    case it has been closed. A frame's deadline covers the whole of it, so this
    has to be asked both on the clock and again before a frame that has just
@@ -321,12 +322,9 @@ static bool frame_expired(int i, int64_t now)
    client is told to retry rather than left waiting for a slot. */
 static uint16_t build_busy(const uint8_t *frame, uint8_t *out)
 {
-    memcpy(out, frame, 4);
-    out[4] = 0; out[5] = 3;
-    out[6] = frame[6];
-    out[7] = (uint8_t)(frame[MB_MBAP_LEN] | 0x80u);
-    out[8] = MB_EXC_DEVICE_BUSY;
-    return MB_MBAP_LEN + 2;
+    mb_request_t req = { .fc = frame[MB_MBAP_LEN] };
+    uint16_t pdu = mb_build_response(&req, NULL, NULL, 0, MB_EXC_DEVICE_BUSY, &out[MB_MBAP_LEN]);
+    return mb_mbap_write(out, frame, frame[6], pdu);
 }
 
 /* Takes one waiting connection and says whether there may be another, so
@@ -344,11 +342,6 @@ static bool accept_one(void)
     socklen_t plen = sizeof(peer);
     int fd = accept(s_listen_fd, (struct sockaddr *)&peer, &plen);
     if (fd < 0) return false;
-
-    /* A slot a worker gave up on in this same iteration is free in all but
-       name; reclaim it before turning anyone away. */
-    for (int i = 0; i < MB_TCP_MAX_CONN; i++)
-        if (s_conn[i].state == SLOT_DEAD) close_slot(i);
 
     int slot = -1;
     for (int i = 0; i < MB_TCP_MAX_CONN; i++)
@@ -449,8 +442,7 @@ static void pump_slot(int i)
        answers "gateway path unavailable" without touching anything that can
        block, and a worker would add a task switch for nothing. */
     if (is_local(c->frame[6]) || !s_jobs) {
-        arm_out(i, process(c->frame, len, c->out));
-        if (!flush_out(i)) close_slot(i);
+        send_now(i, process(c->frame, len, c->out));
         return;
     }
 
@@ -465,8 +457,7 @@ static void pump_slot(int i)
            to retry. */
         s_stats.overloaded++;
         c->state = SLOT_IDLE;
-        arm_out(i, build_busy(c->frame, c->out));
-        if (!flush_out(i)) close_slot(i);
+        send_now(i, build_busy(c->frame, c->out));
     }
 }
 
@@ -505,10 +496,6 @@ static void poller_task(void *arg)
         bool partial = false;
 
         for (int i = 0; i < MB_TCP_MAX_CONN; i++) {
-            if (s_conn[i].state == SLOT_DEAD) {
-                close_slot(i);                       /* a worker could not answer */
-                continue;
-            }
             if (s_conn[i].state != SLOT_IDLE) continue;
 
             if (s_conn[i].fd > maxfd) maxfd = s_conn[i].fd;
@@ -600,7 +587,7 @@ esp_err_t mb_tcp_server_start(uint16_t port, uint8_t local_uid)
        the life of the board. The role is fixed at boot -- changing it needs a
        reboot -- so asking once here is enough. */
     if (mb_gateway_is_running()) {
-        s_jobs = xQueueCreate(MB_TCP_JOB_DEPTH, sizeof(job_t));
+        s_jobs = xQueueCreate(MB_TCP_WORKERS, sizeof(job_t));
         ESP_RETURN_ON_FALSE(s_jobs, ESP_ERR_NO_MEM, TAG, "job queue");
     }
 

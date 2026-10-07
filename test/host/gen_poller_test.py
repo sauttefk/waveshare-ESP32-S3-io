@@ -379,7 +379,7 @@ int main(void)
 '''
 
 types = "".join(src.type(e) for e in (
-    "SLOT_DEAD };",
+    "SLOT_BUSY };",
     "} conn_t;",
     "} job_t;",
 ))
@@ -388,6 +388,7 @@ cuts = "".join(src.func(sig) for sig in (          # C declaration order
     "static bool is_local(uint8_t uid)",
     "static bool flush_out(int i)",
     "static void close_slot(int i)",
+    "static void send_now(int i, uint16_t len)",
     "static bool frame_expired(int i, int64_t now)",
     "static uint16_t build_busy(const uint8_t *frame, uint8_t *out)",
     "static void pump_slot(int i)",

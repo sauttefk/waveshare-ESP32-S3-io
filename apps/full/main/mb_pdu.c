@@ -21,6 +21,14 @@
 
 uint16_t mb_be16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
 
+uint16_t mb_mbap_write(uint8_t *out, const uint8_t *req_hdr, uint8_t uid, uint16_t pdu_len)
+{
+    memcpy(out, req_hdr, 4);                     /* transaction and protocol id */
+    mb_put16(&out[4], (uint16_t)(pdu_len + 1));  /* length counts the unit id   */
+    out[6] = uid;
+    return (uint16_t)(MB_MBAP_LEN + pdu_len);
+}
+
 /* Takes a PDU apart. Returns 0 and fills req, or the exception to answer
    with. Every length is checked against the function code, so a handler
    never sees a count that does not match the bytes behind it. */
@@ -90,10 +98,8 @@ uint8_t mb_parse_pdu(const uint8_t *pdu, uint16_t len, mb_request_t *req)
         if (pdu[1] != MB_MEI_DEVICE_ID) return MB_EXC_ILLEGAL_FUNC;
         if (pdu[2] < MB_DEVID_BASIC || pdu[2] > MB_DEVID_INDIVIDUAL)
             return MB_EXC_ILLEGAL_VALUE;
-        req->count    = pdu[2];                /* read code  */
-        req->addr     = pdu[3];                /* object id  */
-        req->data     = &pdu[1];
-        req->data_len = 3;
+        req->count = pdu[2];                   /* read code  */
+        req->addr  = pdu[3];                   /* object id  */
         return MB_EXC_NONE;
 
     default:
@@ -192,7 +198,7 @@ uint8_t mb_devid_encode(const mb_devid_obj_t *objs, uint16_t n,
        client would read a truncated serial number as the real one. */
     for (uint16_t i = 0; i < n; i++) {
         size_t vl = objs[i].value ? strlen(objs[i].value) : 0;
-        if (vl > 255 || DEVID_HDR + 2 + vl > MB_DATA_MAX) return MB_EXC_DEVICE_FAILURE;
+        if (DEVID_HDR + 2 + vl > MB_DATA_MAX) return MB_EXC_DEVICE_FAILURE;
     }
 
     /* Where to begin. For a stream, the first object of the category at or
@@ -287,13 +293,13 @@ bool mb_value_decode(const uint8_t *regs, uint8_t type, bool word_swap, double *
 uint16_t mb_build_read_request(uint8_t *out, uint16_t tid, uint8_t uid,
                                uint8_t fc, uint16_t reg, uint16_t count)
 {
-    out[0] = (uint8_t)(tid >> 8);  out[1] = (uint8_t)tid;
-    out[2] = 0;                    out[3] = 0;        /* protocol id */
-    out[4] = 0;                    out[5] = 6;        /* unit id plus five PDU bytes */
+    mb_put16(&out[0], tid);
+    mb_put16(&out[2], 0);                /* protocol id */
+    mb_put16(&out[4], 6);                /* unit id plus five PDU bytes */
     out[6] = uid;
     out[7] = fc;
-    out[8] = (uint8_t)(reg >> 8);   out[9]  = (uint8_t)reg;
-    out[10] = (uint8_t)(count >> 8); out[11] = (uint8_t)count;
+    mb_put16(&out[8], reg);
+    mb_put16(&out[10], count);
     return MB_MBAP_LEN + 5;
 }
 

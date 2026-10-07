@@ -245,7 +245,6 @@ static void test_device_id_parse(void)
         CHECK(exc == 0, "FC43 Lesecode %u abgelehnt mit 0x%02X", code, exc);
         CHECK(r.fc == MB_FC_DEVICE_ID && r.count == code && r.addr == 0x81,
               "FC43 Felder falsch (fc %u code %u id %u)", r.fc, r.count, r.addr);
-        CHECK(r.data == &pdu[1] && r.data_len == 3, "FC43 Datenzeiger falsch");
     }
 
     /* Read code 0 and 5 are bad values; MEI 13 is a function we lack. */
