@@ -574,8 +574,13 @@ static esp_err_t api_io_output(httpd_req_t *req)
     /* The hardware moved; tell the Matter side, or a controller keeps
        showing the state before this request. dout_get(): what the port
        really holds, not what was asked. */
-    if (dout_set(ch, new_val) == ESP_OK)
-        matter_do_update(ch, dout_get(ch));
+    esp_err_t set_ret = dout_set(ch, new_val);
+    if (set_ret != ESP_OK) {
+        ESP_LOGW(TAG, "output %d: set failed: %s", ch + 1, esp_err_to_name(set_ret));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "output write failed");
+        return ESP_OK;
+    }
+    matter_do_update(ch, dout_get(ch));
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
     return ESP_OK;

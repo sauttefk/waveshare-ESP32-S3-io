@@ -93,8 +93,14 @@ static esp_err_t attr_update_cb(attribute::callback_type_t type,
             if (s_do_ep[i] == endpoint_id) {
                 bool new_state = val->val.b;
                 ESP_LOGI(TAG, "Matter → DO%d = %s", i + 1, new_state ? "ON" : "OFF");
-                dout_set((uint8_t)i, new_state);
-                return ESP_OK;
+                /* The error goes back to the stack, which then refuses the
+                   attribute write: a port that did not move must not be
+                   shown as moved. */
+                esp_err_t r = dout_set((uint8_t)i, new_state);
+                if (r != ESP_OK)
+                    ESP_LOGW(TAG, "DO%d: write failed (%s), attribute change refused",
+                             i + 1, esp_err_to_name(r));
+                return r;
             }
         }
     }
