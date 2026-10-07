@@ -304,11 +304,14 @@ static void n2k_send_fp(uint32_t pgn, uint8_t pri, uint8_t dst,
 
 static void n2k_build_name(uint8_t name[8])
 {
-    /* Use last 21 bits of base MAC as identity number. */
+    /* The low 21 bits of the base MAC as identity number. The OUI and the
+       top bits are what a batch shares; the low bits are what tells chips
+       apart -- Espressif hands each chip a block of four addresses, so
+       neighbours differ in exactly those. An earlier derivation dropped the
+       three lowest bits and gave such neighbours the same NAME. */
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_BASE);
-    uint32_t identity = ((uint32_t)mac[3] << 13) | ((uint32_t)mac[4] << 5) | (mac[5] >> 3);
-    identity &= 0x1FFFFF;
+    uint32_t identity = (((uint32_t)mac[3] << 16) | ((uint32_t)mac[4] << 8) | mac[5]) & 0x1FFFFF;
 
     uint16_t mfr = N2K_MFR_CODE & 0x7FF;
     /* Byte 0-1: identity[15:0] */
@@ -415,8 +418,10 @@ static void n2k_handle_rx(const rx_msg_t *m)
         memcpy(&their_name, m->data, 8);
         memcpy(&our_name,   s_name,  8);
 
-        /* ISO 11783-5: the lower NAME wins the address. */
-        if (our_name > their_name) {
+        /* ISO 11783-5: the lower NAME wins the address. An equal NAME has no
+           winner, and two devices that both re-assert never settle; moving is
+           the one way out of that. */
+        if (our_name >= their_name) {
             s_addr++;
             if (s_addr > 251) {
                 s_ac_state = AC_FAILED;

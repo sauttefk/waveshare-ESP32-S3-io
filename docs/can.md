@@ -87,7 +87,7 @@ Bit rate is always 250 kbit/s (NMEA2000 standard).
 | Device class              | 0x19 — Sensor Bus                  |
 | Device function           | 0x80 — I/O Gateway                 |
 | Manufacturer code         | 0x7FF (development / unregistered) |
-| Identity number           | Derived from ESP32 base MAC        |
+| Identity number           | The low 21 bits of the ESP32 base MAC |
 | Arbitrary address capable | Yes                                |
 
 ### Address Claiming (PGN 60928)
