@@ -571,7 +571,11 @@ static esp_err_t api_io_output(httpd_req_t *req)
     }
     cJSON_Delete(root);
 
-    dout_set(ch, new_val);
+    /* The hardware moved; tell the Matter side, or a controller keeps
+       showing the state before this request. dout_get(): what the port
+       really holds, not what was asked. */
+    if (dout_set(ch, new_val) == ESP_OK)
+        matter_do_update(ch, dout_get(ch));
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
     return ESP_OK;

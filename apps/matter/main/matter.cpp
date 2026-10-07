@@ -13,6 +13,7 @@
 
 extern "C" {
 #include "dout.h"
+#include "di.h"
 #include "app_config.h"
 #include "eth.h"
 #include "led.h"
@@ -42,7 +43,7 @@ extern "C" void esp_matter_set_ethernet_commissioning(bool use_eth);
 /* Stored after matter_init() succeeds — read-only from web_server task */
 static char s_qr_code[128];
 static char s_manual_code[32];
-static bool s_commissioned;
+static volatile bool s_commissioned;   /* written on the CHIP task, read by HTTP */
 
 extern "C" {
 const char *matter_get_qr_code(void)     { return s_qr_code; }
@@ -136,11 +137,16 @@ static esp_err_t identification_cb(identification::callback_type_t type,
 static void event_cb(const ChipDeviceEvent *event, intptr_t arg)
 {
     switch (event->Type) {
+    /* s_commissioned was set once, after start(); a device paired after
+       that kept reporting "not commissioned" until its next reboot, and
+       refused to decommission on the strength of it. */
     case chip::DeviceLayer::DeviceEventType::kCommissioningComplete:
         ESP_LOGI(TAG, "Matter commissioning complete");
+        s_commissioned = chip::Server::GetInstance().GetFabricTable().FabricCount() > 0;
         break;
     case chip::DeviceLayer::DeviceEventType::kFabricRemoved:
-        if (chip::Server::GetInstance().GetFabricTable().FabricCount() == 0) {
+        s_commissioned = chip::Server::GetInstance().GetFabricTable().FabricCount() > 0;
+        if (!s_commissioned) {
             ESP_LOGW(TAG, "Last Matter fabric removed — rebooting to clean state");
             esp_restart();
         }
@@ -334,6 +340,14 @@ esp_err_t matter_init(void)
 
     ESP_LOGI(TAG, "Matter stack started — %d DO + %d DI endpoints", NUM_CHANNELS, NUM_CHANNELS);
 
+    /* The BooleanState cluster starts at false whatever the endpoint config
+       said -- the value only reaches the attribute store, not the cluster
+       the SDK creates on registration. Push the inputs as they are now, or
+       one that is active at boot and then stays put is shown wrong until
+       its next edge. */
+    for (int i = 0; i < NUM_CHANNELS; i++)
+        matter_di_update((uint8_t)i, di_get((uint8_t)i));
+
     s_commissioned = chip::Server::GetInstance().GetFabricTable().FabricCount() > 0;
     if (s_commissioned) {
         ESP_LOGI(TAG, "Device already commissioned — showing codes for re-commissioning after factory reset");
@@ -412,8 +426,12 @@ void matter_do_update(uint8_t channel, bool state)
     uint16_t ep_id = s_do_ep[channel];
     if (ep_id == 0) return;
 
+    /* report(), not update(): update() runs the attribute callbacks, and
+       attr_update_cb would write the output a second time on the way. The
+       hardware already holds this state; only the controllers have to
+       hear of it. */
     esp_matter_attr_val_t val = esp_matter_bool(state);
-    attribute::update(ep_id,
+    attribute::report(ep_id,
                       OnOff::Id,
                       OnOff::Attributes::OnOff::Id,
                       &val);
