@@ -161,11 +161,16 @@ esp_err_t dout_init(void)
     ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev),
                         TAG, "TCA9554 device add");
 
-    /* Configure all 8 pins as outputs, then drive them all off.
+    /* Load the output register BEFORE enabling the drivers. It powers up as
+     * 0xFF, so configuring the pins as outputs first drove every one of them
+     * high for the length of one I2C frame, at every power-on. A write to the
+     * output register has no effect while the pins are still inputs, which is
+     * what makes this order safe. The expander has no reset pin and keeps its
+     * registers across an ESP reset, so only a power-on has this window.
      * i2c_transmit_safe recovers from a stuck bus on either write. */
+    ESP_RETURN_ON_ERROR(write_outputs(), TAG, "initial write");
     uint8_t cfg_cmd[2] = {REG_CONFIG, 0x00};
     ESP_RETURN_ON_ERROR(i2c_transmit_safe(cfg_cmd, sizeof(cfg_cmd)), TAG, "TCA9554 config");
-    ESP_RETURN_ON_ERROR(write_outputs(), TAG, "initial write");
 
     ESP_LOGI(TAG, "Initialized %d outputs via TCA9554 (I2C addr 0x%02X)", NUM_DO, TCA9554_ADDR);
     return ESP_OK;
