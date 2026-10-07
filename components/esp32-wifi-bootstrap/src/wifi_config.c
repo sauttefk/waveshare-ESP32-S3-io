@@ -539,9 +539,25 @@ static int wifi_config_server_on_url(http_parser *parser, const char *data, size
 }
 
 
+/* The largest body the settings form can produce: an SSID of 32 and a
+   passphrase of 63 characters, every one percent-encoded, plus the field
+   names. Anything beyond it is not a settings form, and a body with no
+   limit let any client on the open setup network grow the allocation until
+   the heap was gone. */
+#define WIFI_CONFIG_MAX_BODY 512
+
 static int wifi_config_server_on_body(http_parser *parser, const char *data, size_t length) {
         client_t *client = parser->data;
-        client->body = realloc(client->body, client->body_length + length + 1);
+        if (length > WIFI_CONFIG_MAX_BODY || client->body_length > WIFI_CONFIG_MAX_BODY - length) {
+                client->disconnected = true;
+                return 1;                       /* stops the parser; the read loop ends */
+        }
+        uint8_t *grown = realloc(client->body, client->body_length + length + 1);
+        if (!grown) {
+                client->disconnected = true;    /* the old buffer is still ours and is freed with the client */
+                return 1;
+        }
+        client->body = grown;
         memcpy(client->body + client->body_length, data, length);
         client->body_length += length;
         client->body[client->body_length] = 0;
