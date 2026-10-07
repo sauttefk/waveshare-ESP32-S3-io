@@ -109,6 +109,7 @@ void buzzer_beep_once(uint32_t freq_hz, uint32_t dur_ms)
     bseq_t seq = { .count = 1 };
     seq.steps[0].freq_hz = freq_hz;
     seq.steps[0].dur_ms  = dur_ms;
+    if (!s_queue) return;               /* before buzzer_init(): nothing to drive yet */
     xQueueOverwrite(s_queue, &seq);
 }
 
@@ -122,6 +123,7 @@ void buzzer_set_tone(uint32_t freq_hz)
     bseq_t seq = { .count = 1 };
     seq.steps[0].freq_hz = freq_hz;
     seq.steps[0].dur_ms  = 0;
+    if (!s_queue) return;               /* before buzzer_init(): nothing to drive yet */
     xQueueOverwrite(s_queue, &seq);
 }
 

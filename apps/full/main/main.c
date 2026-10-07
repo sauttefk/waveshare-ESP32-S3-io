@@ -278,9 +278,15 @@ void app_main(void)
             nvs_close(h);
         }
     }
-    ESP_ERROR_CHECK(scripting_init(startup_script, &s_scripting_io));
+    /* The script task runs at a higher priority than app_main and evaluates
+       the stored script the moment it exists, so everything a top-level
+       statement can reach has to be there first: buzzer().off() outside a
+       rule hit the buzzer's queue before buzzer_init() had created it, and
+       the assert in xQueueOverwrite() rebooted the device -- at every boot,
+       because the script is stored. */
     ESP_ERROR_CHECK(led_init());
     ESP_ERROR_CHECK(buzzer_init());
+    ESP_ERROR_CHECK(scripting_init(startup_script, &s_scripting_io));
     /* Not fatal: both take a stored baudrate/bitrate, and eth_init() runs much
        further down. Aborting here would leave the unit with no network and no
        web UI to correct the value with — an endless boot loop recoverable only

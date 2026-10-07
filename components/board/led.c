@@ -77,6 +77,7 @@ static bool parse_step(cJSON *obj, led_step_t *s)
 static void hw_apply(uint8_t r, uint8_t g, uint8_t b)
 {
     s_r = r; s_g = g; s_b = b;
+    if (!s_strip) return;               /* before led_init(): remembered, applied later */
     /* WS2812 wire order is GRB — swap red and green at the call site. */
     led_strip_set_pixel(s_strip, 0, g, r, b);
     led_strip_refresh(s_strip);
