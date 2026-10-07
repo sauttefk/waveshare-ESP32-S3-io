@@ -215,8 +215,15 @@ InputCondition.prototype.is = function(expected) {
 };
 InputCondition.prototype.isOn  = function() { return this.is(true);  };
 InputCondition.prototype.isOff = function() { return this.is(false); };
+// The level an input condition is checked against comes from the event
+// stream, not from the live pin: events are queued, and by the time a LOW is
+// processed the pin may be HIGH again. Checking the live level then made a
+// late LOW look like HIGH, and a running heldFor() timer that the LOW should
+// have cancelled kept going. .value and .get() stay live -- they are for
+// then() bodies, which want the pin as it is now.
+var _di_seen = {};   // channel -> last level delivered by _on_input()
 InputCondition.prototype._check = function() {
-    var cur = _di_get(this.channel);
+    var cur = (this.channel in _di_seen) ? _di_seen[this.channel] : _di_get(this.channel);
     if (this._expected === undefined) return true;
     return cur === this._expected;
 };
@@ -733,6 +740,7 @@ function _on_mqtt(topic, payload) {
 }
 
 function _on_input(channel, state) {
+    _di_seen[channel] = !!state;
     _fire_matching('input:' + channel);
 }
 
