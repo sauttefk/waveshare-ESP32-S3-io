@@ -754,8 +754,8 @@ static esp_err_t api_config_post(httpd_req_t *req)
        describes the new ones. Everything else on this page needs a reboot,
        which is what the form says; this one does not have to. */
     if (mbm_present) mb_tcp_master_reload();
+    app_time_apply_tz();  /* timezone first, so a sync that follows computes in it */
     sntp_sync_apply();    /* apply any SNTP server / enable change immediately */
-    app_time_apply_tz();  /* apply any timezone change to localtime + cron */
     di_publish_all();
     /* Re-subscribe with potentially new names, then publish all DO states. */
     dout_on_mqtt_connected();

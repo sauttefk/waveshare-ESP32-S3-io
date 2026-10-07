@@ -43,7 +43,11 @@ extern const char dsl_js_start[] asm("_binary_dsl_js_start");
 /* ── Event queue ─────────────────────────────────────────────────────────── */
 
 typedef enum { EVT_MQTT, EVT_INPUT_CHANGE, EVT_RELOAD, EVT_TIMER, EVT_TIME_SYNC,
-               EVT_ACTIVITY } evt_type_t;
+               EVT_ACTIVITY, EVT_TZ_CHANGE } evt_type_t;
+
+/* Input changes the event queue could not take, one bit per channel. Set by
+   whoever reports the change, cleared by the engine when it resyncs. */
+static volatile uint32_t s_input_lost;
 
 // Fieldbus command-activity sources (DSL _on_activity key); see scripting_on_*_activity.
 #define ACT_MODBUS 0
@@ -159,13 +163,21 @@ static void timer_fired_cb(void *arg)
              (unsigned)ev.timer.id);
 }
 
+/* Longer than the five years _cronNext() looks ahead, so no cron delay is ever
+   cut short -- a timer that fires early runs its action unconditionally. */
+#define TIMER_MAX_MS (6.0 * 366 * 24 * 3600 * 1000)
+
 static JSValue js_set_timer(JSContext *ctx, JSValue this_val, int argc, JSValue *argv)
 {
-    int32_t ms;
-    if (JS_ToInt32(ctx, &ms, argv[0]) < 0) return JS_EXCEPTION;
+    /* As a double: a delay to the first of next month is 2.6e9 ms, past
+       what an int32 holds, and the truncation turned it negative, then
+       zero -- the cron action ran at once and rescheduled itself at once. */
+    double ms;
+    if (JS_ToFloat64(ctx, &ms, argv[0]) < 0) return JS_EXCEPTION;
     if (!JS_IsFunction(ctx, argv[1]))
         return JS_ThrowTypeError(ctx, "_set_timer: second argument must be a function");
-    if (ms < 0) ms = 0;
+    if (!(ms >= 0)) ms = 0;                       /* negative, or NaN */
+    if (ms > TIMER_MAX_MS) ms = TIMER_MAX_MS;
 
     int slot = -1;
     for (int i = 0; i < MAX_TIMERS; i++) if (!s_timers[i].used) { slot = i; break; }
@@ -187,7 +199,7 @@ static JSValue js_set_timer(JSContext *ctx, JSValue this_val, int argc, JSValue 
     esp_timer_handle_t h;
     if (esp_timer_create(&args, &h) != ESP_OK)
         return JS_NewInt32(ctx, -1);
-    if (esp_timer_start_once(h, (uint64_t)ms * 1000) != ESP_OK) {
+    if (esp_timer_start_once(h, (uint64_t)(ms * 1000.0)) != ESP_OK) {
         esp_timer_delete(h);
         return JS_NewInt32(ctx, -1);
     }
@@ -394,6 +406,29 @@ static void run_timer(JSContext *ctx, uint32_t id)
     JS_FreeValue(ctx, fn);
 }
 
+/* Input changes the queue dropped are made good from the live level: the
+   DSL compares it with what it last saw and raises the event only if they
+   differ. Both levels of a dropped LOW-HIGH pair are gone for good, but no
+   condition is left believing a level the input no longer has. */
+static void resync_lost_inputs(JSContext *ctx)
+{
+    uint32_t lost = __atomic_exchange_n(&s_input_lost, 0u, __ATOMIC_RELAXED);
+    if (!lost || !g_scripting_io || !g_scripting_io->di_get) return;
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue fn = JS_GetPropertyStr(ctx, global, "_resync_input");
+    JS_FreeValue(ctx, global);
+    if (JS_IsFunction(ctx, fn)) {
+        for (int ch = 0; lost; ch++, lost >>= 1) {
+            if (!(lost & 1)) continue;
+            JSValue args[2] = { JS_NewInt32(ctx, ch),
+                                JS_NewBool(ctx, g_scripting_io->di_get((uint8_t)ch)) };
+            JSValue r = JS_Call(ctx, fn, JS_UNDEFINED, 2, args);
+            JS_FreeValue(ctx, r);
+        }
+    }
+    JS_FreeValue(ctx, fn);
+}
+
 static void drain_overflow(JSContext *ctx)
 {
     while (s_of_tail != s_of_head) {
@@ -458,6 +493,7 @@ static void scripting_task(void *arg)
     scripting_evt_t ev;
     for (;;) {
         drain_overflow(ctx);   /* timers the event queue could not take */
+        resync_lost_inputs(ctx);
 
         if (xQueueReceive(s_queue, &ev, pdMS_TO_TICKS(200)) == pdTRUE) {
             budget_start();
@@ -588,6 +624,22 @@ static void scripting_task(void *arg)
                     JS_FreeValue(ctx, r);
                 }
                 break;
+            case EVT_TZ_CHANGE:
+                /* The timers already armed were computed with the old offset.
+                   Re-armed only if the clock is valid: unlike a time sync this
+                   must not declare it so. */
+                if (s_time_valid && JS_IsFunction(ctx, on_time_sync)) {
+                    JSValue r = JS_Call(ctx, on_time_sync, JS_UNDEFINED, 0, NULL);
+                    if (JS_IsException(r)) {
+                        JSValue exc = JS_GetException(ctx);
+                        const char *msg = JS_ToCString(ctx, exc);
+                        ESP_LOGE(TAG, "_on_time_sync (tz) error: %s", msg ? msg : "(unknown)");
+                        JS_FreeCString(ctx, msg);
+                        JS_FreeValue(ctx, exc);
+                    }
+                    JS_FreeValue(ctx, r);
+                }
+                break;
             case EVT_ACTIVITY: {
                 // A fieldbus command arrived → feed the matching DSL command-health source.
                 const char *src = (ev.activity.source == ACT_CAN) ? "can" : "modbus";
@@ -681,6 +733,14 @@ void scripting_set_time_valid(void)
     s_time_valid = true;
 }
 
+void scripting_on_tz_change(void)
+{
+    if (!s_queue) return;
+    scripting_evt_t ev = { .type = EVT_TZ_CHANGE };
+    if (xQueueSend(s_queue, &ev, 0) != pdTRUE)
+        ESP_LOGW(TAG, "scripting_on_tz_change: queue full");
+}
+
 void scripting_on_time_sync(void)
 {
     // Runtime path: an SNTP sync stepped the clock. Tell the scripting task to re-arm
@@ -711,6 +771,11 @@ void scripting_on_input_change(uint8_t channel, bool state)
         .type  = EVT_INPUT_CHANGE,
         .input = { .channel = channel, .state = state },
     };
-    if (xQueueSend(s_queue, &ev, 0) != pdTRUE)
-        ESP_LOGW(TAG, "Event queue full — input change dropped");
+    if (xQueueSend(s_queue, &ev, 0) != pdTRUE) {
+        /* Remembered, not lost: the engine re-reads the channel's live level
+           on its next pass and delivers that as the event, so a condition's
+           shadow of the input cannot stay behind for good. */
+        __atomic_fetch_or(&s_input_lost, 1u << (channel & 31), __ATOMIC_RELAXED);
+        ESP_LOGW(TAG, "Event queue full — input change dropped, resync pending");
+    }
 }

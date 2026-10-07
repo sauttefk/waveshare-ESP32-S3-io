@@ -62,6 +62,10 @@ typedef struct {
 
 void scripting_reload_status(scripting_reload_status_t *out);
 
+// The timezone changed: cron timers already armed carry the old offset and
+// are re-armed. Does not declare the clock valid. Safe to call from any task.
+void scripting_on_tz_change(void);
+
 // Mark the wall-clock as valid (real time available). Cron triggers stay suppressed
 // until this is true, so they don't fire boot-relative. Call BEFORE scripting_init()
 // when the RTC seeded real time at boot. Safe to call from any task.

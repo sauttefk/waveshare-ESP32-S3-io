@@ -744,6 +744,14 @@ function _on_input(channel, state) {
     _fire_matching('input:' + channel);
 }
 
+// An input change the engine's queue dropped: the live level is delivered
+// as the event it would have been, unless it is what was last seen anyway.
+function _resync_input(channel, live) {
+    live = !!live;
+    if ((channel in _di_seen) && _di_seen[channel] === live) return;
+    _on_input(channel, live);
+}
+
 function _rule_matches(r) {
     for (var j = 0; j < r.conditions.length; j++) {
         var cond = r.conditions[j];

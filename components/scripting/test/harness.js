@@ -51,7 +51,7 @@ function createEngine(opts) {
     print(...a)        { prints.push(a.join(' ')); },
     _set_timer(ms, fn) {
       if (timers.size >= maxTimers) return -1;   // table full — as the device does
-      const id = nextId++; timers.set(id, { at: now + (ms | 0), fn }); return id;
+      const id = nextId++; timers.set(id, { at: now + Math.max(0, ms), fn }); return id;   // no int32 truncation, as on the device
     },
     _clear_timer(id)   { timers.delete(id); },
     _now()             { return now; },        // virtual wall-clock (epoch ms) for cron
